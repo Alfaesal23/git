@@ -21,12 +21,11 @@ In the test, these paths are used:
 	yomin   - not in H or M
 '
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-read-tree.sh
 
 read_tree_twoway () {
-    git read-tree -m "$1" "$2" && git ls-files --stage
+	git read-tree -m "$1" "$2" && git ls-files --stage
 }
 
 compare_change () {
@@ -397,7 +396,7 @@ test_expect_success 'a/b vs a, plus c/d case setup.' '
 
 test_expect_success 'a/b vs a, plus c/d case test.' '
 	read_tree_u_must_succeed -u -m "$treeH" "$treeM" &&
-	git ls-files --stage | tee >treeMcheck.out &&
+	git ls-files --stage >treeMcheck.out &&
 	test_cmp treeM.out treeMcheck.out
 '
 

@@ -9,14 +9,18 @@
  */
 
 #define GIT_TEST_PROGRESS_ONLY
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "pager.h"
 #include "progress.h"
+#include "repository.h"
 #include "strbuf.h"
 #include "trace.h"
 #include "trace2.h"
 #include "utf8.h"
-#include "config.h"
+#include "parse.h"
 
 #define TP_IDX_MAX      8
 

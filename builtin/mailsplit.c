@@ -4,7 +4,9 @@
  * It just splits a mbox into a list of files: "0001" "0002" ..
  * so you can process them further from there.
  */
-#include "cache.h"
+
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "builtin.h"
 #include "gettext.h"
 #include "string-list.h"
@@ -114,8 +116,8 @@ static int populate_maildir_list(struct string_list *list, const char *path)
 	DIR *dir;
 	struct dirent *dent;
 	char *name = NULL;
-	char *subs[] = { "cur", "new", NULL };
-	char **sub;
+	const char *subs[] = { "cur", "new", NULL };
+	const char **sub;
 	int ret = -1;
 
 	for (sub = subs; *sub; ++sub) {
@@ -173,7 +175,6 @@ static int split_maildir(const char *maildir, const char *dir,
 	char *file = NULL;
 	FILE *f = NULL;
 	int ret = -1;
-	int i;
 	struct string_list list = STRING_LIST_INIT_DUP;
 
 	list.cmp = maildir_filename_cmp;
@@ -181,7 +182,7 @@ static int split_maildir(const char *maildir, const char *dir,
 	if (populate_maildir_list(&list, maildir) < 0)
 		goto out;
 
-	for (i = 0; i < list.nr; i++) {
+	for (size_t i = 0; i < list.nr; i++) {
 		char *name;
 
 		free(file);
@@ -270,7 +271,10 @@ out:
 	return ret;
 }
 
-int cmd_mailsplit(int argc, const char **argv, const char *prefix)
+int cmd_mailsplit(int argc,
+		  const char **argv,
+		  const char *prefix,
+		  struct repository *repo UNUSED)
 {
 	int nr = 0, nr_prec = 4, num = 0;
 	int allow_bare = 0;

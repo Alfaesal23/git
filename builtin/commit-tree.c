@@ -3,18 +3,15 @@
  *
  * Copyright (C) Linus Torvalds, 2005
  */
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+#include "builtin.h"
 #include "config.h"
 #include "gettext.h"
 #include "hex.h"
 #include "object-name.h"
-#include "object-store.h"
-#include "repository.h"
+#include "object-store-ll.h"
+
 #include "commit.h"
-#include "tree.h"
-#include "builtin.h"
-#include "utf8.h"
-#include "gpg-interface.h"
 #include "parse-options.h"
 
 static const char * const commit_tree_usage[] = {
@@ -94,7 +91,10 @@ static int parse_file_arg_callback(const struct option *opt,
 	return 0;
 }
 
-int cmd_commit_tree(int argc, const char **argv, const char *prefix)
+int cmd_commit_tree(int argc,
+		    const char **argv,
+		    const char *prefix,
+		    struct repository *repo UNUSED)
 {
 	static struct strbuf buffer = STRBUF_INIT;
 	struct commit_list *parents = NULL;
@@ -115,6 +115,7 @@ int cmd_commit_tree(int argc, const char **argv, const char *prefix)
 			N_("GPG sign commit"), PARSE_OPT_OPTARG, NULL, (intptr_t) "" },
 		OPT_END()
 	};
+	int ret;
 
 	git_config(git_default_config, NULL);
 
@@ -136,11 +137,15 @@ int cmd_commit_tree(int argc, const char **argv, const char *prefix)
 
 	if (commit_tree(buffer.buf, buffer.len, &tree_oid, parents, &commit_oid,
 			NULL, sign_commit)) {
-		strbuf_release(&buffer);
-		return 1;
+		ret = 1;
+		goto out;
 	}
 
 	printf("%s\n", oid_to_hex(&commit_oid));
+	ret = 0;
+
+out:
+	free_commit_list(parents);
 	strbuf_release(&buffer);
-	return 0;
+	return ret;
 }

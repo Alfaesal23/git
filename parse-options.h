@@ -3,6 +3,8 @@
 
 #include "gettext.h"
 
+struct repository;
+
 /**
  * Refer to Documentation/technical/api-parse-options.txt for the API doc.
  */
@@ -73,7 +75,7 @@ typedef enum parse_opt_result parse_opt_ll_cb(struct parse_opt_ctx_t *ctx,
 					      const char *arg, int unset);
 
 typedef int parse_opt_subcommand_fn(int argc, const char **argv,
-				    const char *prefix);
+				    const char *prefix, struct repository *repo);
 
 /*
  * `type`::
@@ -351,11 +353,23 @@ struct option {
 	.callback = parse_opt_noop_cb, \
 }
 
+static char *parse_options_noop_ignored_value MAYBE_UNUSED;
+#define OPT_NOOP_ARG(s, l) { \
+	.type = OPTION_CALLBACK, \
+	.short_name = (s), \
+	.long_name = (l), \
+	.value = &parse_options_noop_ignored_value, \
+	.argh = "ignored", \
+	.help = N_("no-op (backward compatibility)"), \
+	.flags = PARSE_OPT_HIDDEN, \
+	.callback = parse_opt_noop_cb, \
+}
+
 #define OPT_ALIAS(s, l, source_long_name) { \
 	.type = OPTION_ALIAS, \
 	.short_name = (s), \
 	.long_name = (l), \
-	.value = (source_long_name), \
+	.value = (char *)(source_long_name), \
 }
 
 #define OPT_SUBCOMMAND_F(l, v, fn, f) { \
@@ -445,6 +459,8 @@ static inline void die_for_incompatible_opt3(int opt1, const char *opt1_name,
 
 /*----- incremental advanced APIs -----*/
 
+struct parse_opt_cmdmode_list;
+
 /*
  * It's okay for the caller to consume argv/argc in the usual way.
  * Other fields of that structure are private to parse-options and should not
@@ -459,7 +475,7 @@ struct parse_opt_ctx_t {
 	unsigned has_subcommands;
 	const char *prefix;
 	const char **alias_groups; /* must be in groups of 3 elements! */
-	struct option *updated_options;
+	struct parse_opt_cmdmode_list *cmdmode_list;
 };
 
 void parse_options_start(struct parse_opt_ctx_t *ctx,
@@ -580,5 +596,11 @@ int parse_opt_tracking_mode(const struct option *, const char *, int);
 #define OPT_PATHSPEC_FROM_FILE(v) OPT_FILENAME(0, "pathspec-from-file", v, N_("read pathspec from file"))
 #define OPT_PATHSPEC_FILE_NUL(v)  OPT_BOOL(0, "pathspec-file-nul", v, N_("with --pathspec-from-file, pathspec elements are separated with NUL character"))
 #define OPT_AUTOSTASH(v) OPT_BOOL(0, "autostash", v, N_("automatically stash/stash pop before and after"))
+
+#define OPT_IPVERSION(v) \
+	OPT_SET_INT_F('4', "ipv4", (v), N_("use IPv4 addresses only"), \
+		TRANSPORT_FAMILY_IPV4, PARSE_OPT_NONEG), \
+	OPT_SET_INT_F('6', "ipv6", (v), N_("use IPv6 addresses only"), \
+		TRANSPORT_FAMILY_IPV6, PARSE_OPT_NONEG)
 
 #endif

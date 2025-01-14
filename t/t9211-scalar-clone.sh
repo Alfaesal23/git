@@ -31,7 +31,7 @@ test_expect_success 'set up repository to clone' '
 	)
 '
 
-cleanup_clone () {
+cleanup_clone() {
 	rm -rf "$1"
 }
 
@@ -127,7 +127,7 @@ test_expect_success '--single-branch clones HEAD only' '
 	(
 		cd $enlistment/src &&
 		git for-each-ref refs/remotes/origin >out &&
-		test_line_count = 1 out &&
+		test_line_count = 2 out &&
 		grep "refs/remotes/origin/base" out
 	) &&
 
@@ -141,7 +141,7 @@ test_expect_success '--no-single-branch clones all branches' '
 	(
 		cd $enlistment/src &&
 		git for-each-ref refs/remotes/origin >out &&
-		test_line_count = 2 out &&
+		test_line_count = 3 out &&
 		grep "refs/remotes/origin/base" out &&
 		grep "refs/remotes/origin/parallel" out
 	) &&
@@ -178,6 +178,18 @@ test_expect_success 'scalar clone warns when background maintenance fails' '
 	GIT_TEST_MAINT_SCHEDULER="crontab:false,launchctl:false,schtasks:false" \
 		scalar clone "file://$(pwd)/to-clone" maint-fail 2>err &&
 	grep "could not turn on maintenance" err
+'
+
+test_expect_success '`scalar clone --no-src`' '
+	scalar clone --src "file://$(pwd)/to-clone" with-src &&
+	scalar clone --no-src "file://$(pwd)/to-clone" without-src &&
+
+	test_path_is_dir with-src/src &&
+	test_path_is_missing without-src/src &&
+
+	(cd with-src/src && ls ?*) >with &&
+	(cd without-src && ls ?*) >without &&
+	test_cmp with without
 '
 
 test_done

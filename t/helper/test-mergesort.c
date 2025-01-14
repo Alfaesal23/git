@@ -1,7 +1,9 @@
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "test-tool.h"
-#include "cache.h"
 #include "mem-pool.h"
 #include "mergesort.h"
+#include "strbuf.h"
 
 static uint32_t minstd_rand(uint32_t *state)
 {
@@ -122,7 +124,7 @@ static const struct dist *get_dist_by_name(const char *name)
 	return NULL;
 }
 
-static void mode_copy(int *arr, int n)
+static void mode_copy(int *arr UNUSED, int n UNUSED)
 {
 	/* nothing */
 }
