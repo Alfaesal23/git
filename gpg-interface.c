@@ -1,18 +1,22 @@
+#define USE_THE_REPOSITORY_VARIABLE
+
 #include "git-compat-util.h"
 #include "commit.h"
 #include "config.h"
+#include "date.h"
 #include "gettext.h"
 #include "run-command.h"
 #include "strbuf.h"
 #include "dir.h"
 #include "ident.h"
 #include "gpg-interface.h"
+#include "path.h"
 #include "sigchain.h"
 #include "tempfile.h"
 #include "alias.h"
-#include "wrapper.h"
 
-static int git_gpg_config(const char *, const char *, void *);
+static int git_gpg_config(const char *, const char *,
+			  const struct config_context *, void *);
 
 static void gpg_interface_lazy_init(void)
 {
@@ -25,7 +29,9 @@ static void gpg_interface_lazy_init(void)
 }
 
 static char *configured_signing_key;
-static const char *ssh_default_key_command, *ssh_allowed_signers, *ssh_revocation_file;
+static char *ssh_default_key_command;
+static char *ssh_allowed_signers;
+static char *ssh_revocation_file;
 static enum signature_trust_level configured_min_trust_level = TRUST_UNDEFINED;
 
 struct gpg_format {
@@ -39,8 +45,8 @@ struct gpg_format {
 				    size_t signature_size);
 	int (*sign_buffer)(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
-	const char *(*get_default_key)(void);
-	const char *(*get_key_id)(void);
+	char *(*get_default_key)(void);
+	char *(*get_key_id)(void);
 };
 
 static const char *openpgp_verify_args[] = {
@@ -80,9 +86,9 @@ static int sign_buffer_gpg(struct strbuf *buffer, struct strbuf *signature,
 static int sign_buffer_ssh(struct strbuf *buffer, struct strbuf *signature,
 			   const char *signing_key);
 
-static const char *get_default_ssh_signing_key(void);
+static char *get_default_ssh_signing_key(void);
 
-static const char *get_ssh_key_id(void);
+static char *get_ssh_key_id(void);
 
 static struct gpg_format gpg_format[] = {
 	{
@@ -121,9 +127,7 @@ static struct gpg_format *use_format = &gpg_format[0];
 
 static struct gpg_format *get_format_by_name(const char *str)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(gpg_format); i++)
+	for (size_t i = 0; i < ARRAY_SIZE(gpg_format); i++)
 		if (!strcmp(gpg_format[i].name, str))
 			return gpg_format + i;
 	return NULL;
@@ -131,9 +135,9 @@ static struct gpg_format *get_format_by_name(const char *str)
 
 static struct gpg_format *get_format_by_sig(const char *sig)
 {
-	int i, j;
+	int j;
 
-	for (i = 0; i < ARRAY_SIZE(gpg_format); i++)
+	for (size_t i = 0; i < ARRAY_SIZE(gpg_format); i++)
 		for (j = 0; gpg_format[i].sigs[j]; j++)
 			if (starts_with(sig, gpg_format[i].sigs[j]))
 				return gpg_format + i;
@@ -221,7 +225,7 @@ static void parse_gpg_output(struct signature_check *sigc)
 {
 	const char *buf = sigc->gpg_status;
 	const char *line, *next;
-	int i, j;
+	int j;
 	int seen_exclusive_status = 0;
 
 	/* Iterate over all lines */
@@ -236,7 +240,7 @@ static void parse_gpg_output(struct signature_check *sigc)
 			continue;
 
 		/* Iterate over all search strings */
-		for (i = 0; i < ARRAY_SIZE(sigcheck_gpg_status); i++) {
+		for (size_t i = 0; i < ARRAY_SIZE(sigcheck_gpg_status); i++) {
 			if (skip_prefix(line, sigcheck_gpg_status[i].check, &line)) {
 				/*
 				 * GOODSIG, BADSIG etc. can occur only once for
@@ -394,7 +398,7 @@ static void parse_ssh_output(struct signature_check *sigc)
 	 * Note that "PRINCIPAL" can contain whitespace, "RSA" and
 	 * "SHA256" part could be a different token that names of
 	 * the algorithms used, and "FINGERPRINT" is a hexadecimal
-	 * string.  By finding the last occurence of " with ", we can
+	 * string.  By finding the last occurrence of " with ", we can
 	 * reliably parse out the PRINCIPAL.
 	 */
 	sigc->result = 'B';
@@ -481,7 +485,7 @@ static int verify_ssh_signed_buffer(struct signature_check *sigc,
 
 	if (sigc->payload_timestamp)
 		strbuf_addf(&verify_time, "-Overify-time=%s",
-			show_date(sigc->payload_timestamp, 0, &verify_date_mode));
+			show_date(sigc->payload_timestamp, 0, verify_date_mode));
 
 	/* Find the principal from the signers */
 	strvec_pushl(&ssh_keygen.args, fmt->program,
@@ -584,8 +588,8 @@ static int verify_ssh_signed_buffer(struct signature_check *sigc,
 		}
 	}
 
-	strbuf_stripspace(&ssh_keygen_out, 0);
-	strbuf_stripspace(&ssh_keygen_err, 0);
+	strbuf_stripspace(&ssh_keygen_out, NULL);
+	strbuf_stripspace(&ssh_keygen_err, NULL);
 	/* Add stderr outputs to show the user actual ssh-keygen errors */
 	strbuf_add(&ssh_keygen_out, ssh_principals_err.buf, ssh_principals_err.len);
 	strbuf_add(&ssh_keygen_out, ssh_keygen_err.buf, ssh_keygen_err.len);
@@ -650,7 +654,7 @@ int check_signature(struct signature_check *sigc,
 	gpg_interface_lazy_init();
 
 	sigc->result = 'N';
-	sigc->trust_level = -1;
+	sigc->trust_level = TRUST_UNDEFINED;
 
 	fmt = get_format_by_sig(signature);
 	if (!fmt)
@@ -693,7 +697,7 @@ size_t parse_signed_buffer(const char *buf, size_t size)
 			match = len;
 
 		eol = memchr(buf + len, '\n', size - len);
-		len += eol ? eol - (buf + len) + 1 : size - len;
+		len += eol ? (size_t) (eol - (buf + len) + 1) : size - len;
 	}
 	return match;
 }
@@ -718,10 +722,12 @@ void set_signing_key(const char *key)
 	configured_signing_key = xstrdup(key);
 }
 
-static int git_gpg_config(const char *var, const char *value, void *cb UNUSED)
+static int git_gpg_config(const char *var, const char *value,
+			  const struct config_context *ctx UNUSED,
+			  void *cb UNUSED)
 {
 	struct gpg_format *fmt = NULL;
-	char *fmtname = NULL;
+	const char *fmtname = NULL;
 	char *trust;
 	int ret;
 
@@ -757,23 +763,14 @@ static int git_gpg_config(const char *var, const char *value, void *cb UNUSED)
 		return 0;
 	}
 
-	if (!strcmp(var, "gpg.ssh.defaultkeycommand")) {
-		if (!value)
-			return config_error_nonbool(var);
+	if (!strcmp(var, "gpg.ssh.defaultkeycommand"))
 		return git_config_string(&ssh_default_key_command, var, value);
-	}
 
-	if (!strcmp(var, "gpg.ssh.allowedsignersfile")) {
-		if (!value)
-			return config_error_nonbool(var);
+	if (!strcmp(var, "gpg.ssh.allowedsignersfile"))
 		return git_config_pathname(&ssh_allowed_signers, var, value);
-	}
 
-	if (!strcmp(var, "gpg.ssh.revocationfile")) {
-		if (!value)
-			return config_error_nonbool(var);
+	if (!strcmp(var, "gpg.ssh.revocationfile"))
 		return git_config_pathname(&ssh_revocation_file, var, value);
-	}
 
 	if (!strcmp(var, "gpg.program") || !strcmp(var, "gpg.openpgp.program"))
 		fmtname = "openpgp";
@@ -786,7 +783,7 @@ static int git_gpg_config(const char *var, const char *value, void *cb UNUSED)
 
 	if (fmtname) {
 		fmt = get_format_by_name(fmtname);
-		return git_config_string(&fmt->program, var, value);
+		return git_config_string((char **) &fmt->program, var, value);
 	}
 
 	return 0;
@@ -848,7 +845,7 @@ static char *get_ssh_key_fingerprint(const char *signing_key)
 }
 
 /* Returns the first public key from an ssh-agent to use for signing */
-static const char *get_default_ssh_signing_key(void)
+static char *get_default_ssh_signing_key(void)
 {
 	struct child_process ssh_default_key = CHILD_PROCESS_INIT;
 	int ret = -1;
@@ -900,12 +897,16 @@ static const char *get_default_ssh_signing_key(void)
 	return default_key;
 }
 
-static const char *get_ssh_key_id(void) {
-	return get_ssh_key_fingerprint(get_signing_key());
+static char *get_ssh_key_id(void)
+{
+	char *signing_key = get_signing_key();
+	char *key_id = get_ssh_key_fingerprint(signing_key);
+	free(signing_key);
+	return key_id;
 }
 
 /* Returns a textual but unique representation of the signing key */
-const char *get_signing_key_id(void)
+char *get_signing_key_id(void)
 {
 	gpg_interface_lazy_init();
 
@@ -917,17 +918,17 @@ const char *get_signing_key_id(void)
 	return get_signing_key();
 }
 
-const char *get_signing_key(void)
+char *get_signing_key(void)
 {
 	gpg_interface_lazy_init();
 
 	if (configured_signing_key)
-		return configured_signing_key;
+		return xstrdup(configured_signing_key);
 	if (use_format->get_default_key) {
 		return use_format->get_default_key();
 	}
 
-	return git_committer_info(IDENT_STRICT | IDENT_NO_DATE);
+	return xstrdup(git_committer_info(IDENT_STRICT | IDENT_NO_DATE));
 }
 
 const char *gpg_trust_level_to_str(enum signature_trust_level level)
@@ -1083,7 +1084,7 @@ static int sign_buffer_ssh(struct strbuf *buffer, struct strbuf *signature,
 		if (strstr(signer_stderr.buf, "usage:"))
 			error(_("ssh-keygen -Y sign is needed for ssh signing (available in openssh version 8.2p1+)"));
 
-		error("%s", signer_stderr.buf);
+		ret = error("%s", signer_stderr.buf);
 		goto out;
 	}
 
