@@ -1,8 +1,11 @@
 /*
  * Copyright (c) 2011, Google Inc.
  */
+
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
-#include "alloc.h"
 #include "bulk-checkin.h"
 #include "environment.h"
 #include "gettext.h"
@@ -12,12 +15,10 @@
 #include "csum-file.h"
 #include "pack.h"
 #include "strbuf.h"
-#include "string-list.h"
 #include "tmp-objdir.h"
 #include "packfile.h"
 #include "object-file.h"
-#include "object-store.h"
-#include "wrapper.h"
+#include "object-store-ll.h"
 
 static int odb_transaction_nesting;
 
@@ -43,8 +44,9 @@ static void finish_tmp_packfile(struct strbuf *basename,
 {
 	char *idx_tmp_name = NULL;
 
-	stage_tmp_packfiles(basename, pack_tmp_name, written_list, nr_written,
-			    NULL, pack_idx_opts, hash, &idx_tmp_name);
+	stage_tmp_packfiles(the_hash_algo, basename, pack_tmp_name,
+			    written_list, nr_written, NULL, pack_idx_opts, hash,
+			    &idx_tmp_name);
 	rename_tmp_packfile_idx(basename, &idx_tmp_name);
 
 	free(idx_tmp_name);
@@ -61,6 +63,7 @@ static void flush_bulk_checkin_packfile(struct bulk_checkin_packfile *state)
 
 	if (state->nr_written == 0) {
 		close(state->f->fd);
+		free_hashfile(state->f);
 		unlink(state->pack_tmp_name);
 		goto clear_exit;
 	} else if (state->nr_written == 1) {
@@ -68,13 +71,13 @@ static void flush_bulk_checkin_packfile(struct bulk_checkin_packfile *state)
 				  CSUM_HASH_IN_STREAM | CSUM_FSYNC | CSUM_CLOSE);
 	} else {
 		int fd = finalize_hashfile(state->f, hash, FSYNC_COMPONENT_PACK, 0);
-		fixup_pack_header_footer(fd, hash, state->pack_tmp_name,
+		fixup_pack_header_footer(the_hash_algo, fd, hash, state->pack_tmp_name,
 					 state->nr_written, hash,
 					 state->offset);
 		close(fd);
 	}
 
-	strbuf_addf(&packname, "%s/pack/pack-%s.", get_object_directory(),
+	strbuf_addf(&packname, "%s/pack/pack-%s.", repo_get_object_directory(the_repository),
 		    hash_to_hex(hash));
 	finish_tmp_packfile(&packname, state->pack_tmp_name,
 			    state->written, state->nr_written,
@@ -83,6 +86,7 @@ static void flush_bulk_checkin_packfile(struct bulk_checkin_packfile *state)
 		free(state->written[i]);
 
 clear_exit:
+	free(state->pack_tmp_name);
 	free(state->written);
 	memset(state, 0, sizeof(*state));
 
@@ -111,7 +115,7 @@ static void flush_batch_fsync(void)
 	 * to ensure that the data in each new object file is durable before
 	 * the final name is visible.
 	 */
-	strbuf_addf(&temp_path, "%s/bulk_fsync_XXXXXX", get_object_directory());
+	strbuf_addf(&temp_path, "%s/bulk_fsync_XXXXXX", repo_get_object_directory(the_repository));
 	temp = xmks_tempfile(temp_path.buf);
 	fsync_or_die(get_tempfile_fd(temp), get_tempfile_path(temp));
 	delete_tempfile(&temp);
@@ -157,10 +161,10 @@ static int already_written(struct bulk_checkin_packfile *state, struct object_id
  * status before calling us just in case we ask it to call us again
  * with a new pack.
  */
-static int stream_to_pack(struct bulk_checkin_packfile *state,
-			  git_hash_ctx *ctx, off_t *already_hashed_to,
-			  int fd, size_t size, enum object_type type,
-			  const char *path, unsigned flags)
+static int stream_blob_to_pack(struct bulk_checkin_packfile *state,
+			       struct git_hash_ctx *ctx, off_t *already_hashed_to,
+			       int fd, size_t size, const char *path,
+			       unsigned flags)
 {
 	git_zstream s;
 	unsigned char ibuf[16384];
@@ -172,7 +176,7 @@ static int stream_to_pack(struct bulk_checkin_packfile *state,
 
 	git_deflate_init(&s, pack_compression_level);
 
-	hdrlen = encode_in_pack_object_header(obuf, sizeof(obuf), type, size);
+	hdrlen = encode_in_pack_object_header(obuf, sizeof(obuf), OBJ_BLOB, size);
 	s.next_out = obuf + hdrlen;
 	s.avail_out = sizeof(obuf) - hdrlen;
 
@@ -191,7 +195,7 @@ static int stream_to_pack(struct bulk_checkin_packfile *state,
 				if (rsize < hsize)
 					hsize = rsize;
 				if (hsize)
-					the_hash_algo->update_fn(ctx, ibuf, hsize);
+					git_hash_update(ctx, ibuf, hsize);
 				*already_hashed_to = offset;
 			}
 			s.next_in = ibuf;
@@ -249,17 +253,16 @@ static void prepare_to_stream(struct bulk_checkin_packfile *state,
 		die_errno("unable to write pack header");
 }
 
-static int deflate_to_pack(struct bulk_checkin_packfile *state,
-			   struct object_id *result_oid,
-			   int fd, size_t size,
-			   enum object_type type, const char *path,
-			   unsigned flags)
+static int deflate_blob_to_pack(struct bulk_checkin_packfile *state,
+				struct object_id *result_oid,
+				int fd, size_t size,
+				const char *path, unsigned flags)
 {
 	off_t seekback, already_hashed_to;
-	git_hash_ctx ctx;
+	struct git_hash_ctx ctx;
 	unsigned char obuf[16384];
 	unsigned header_len;
-	struct hashfile_checkpoint checkpoint = {0};
+	struct hashfile_checkpoint checkpoint;
 	struct pack_idx_entry *idx = NULL;
 
 	seekback = lseek(fd, 0, SEEK_CUR);
@@ -267,13 +270,17 @@ static int deflate_to_pack(struct bulk_checkin_packfile *state,
 		return error("cannot find the current offset");
 
 	header_len = format_object_header((char *)obuf, sizeof(obuf),
-					  type, size);
+					  OBJ_BLOB, size);
 	the_hash_algo->init_fn(&ctx);
-	the_hash_algo->update_fn(&ctx, obuf, header_len);
+	git_hash_update(&ctx, obuf, header_len);
 
 	/* Note: idx is non-NULL when we are writing */
-	if ((flags & HASH_WRITE_OBJECT) != 0)
+	if ((flags & HASH_WRITE_OBJECT) != 0) {
 		CALLOC_ARRAY(idx, 1);
+
+		prepare_to_stream(state, flags);
+		hashfile_checkpoint_init(state->f, &checkpoint);
+	}
 
 	already_hashed_to = 0;
 
@@ -284,8 +291,8 @@ static int deflate_to_pack(struct bulk_checkin_packfile *state,
 			idx->offset = state->offset;
 			crc32_begin(state->f);
 		}
-		if (!stream_to_pack(state, &ctx, &already_hashed_to,
-				    fd, size, type, path, flags))
+		if (!stream_blob_to_pack(state, &ctx, &already_hashed_to,
+					 fd, size, path, flags))
 			break;
 		/*
 		 * Writing this object to the current pack will make
@@ -300,7 +307,7 @@ static int deflate_to_pack(struct bulk_checkin_packfile *state,
 		if (lseek(fd, seekback, SEEK_SET) == (off_t) -1)
 			return error("cannot seek back");
 	}
-	the_hash_algo->final_oid_fn(result_oid, &ctx);
+	git_hash_final_oid(result_oid, &ctx);
 	if (!idx)
 		return 0;
 
@@ -330,7 +337,7 @@ void prepare_loose_object_bulk_checkin(void)
 	if (!odb_transaction_nesting || bulk_fsync_objdir)
 		return;
 
-	bulk_fsync_objdir = tmp_objdir_create("bulk-fsync");
+	bulk_fsync_objdir = tmp_objdir_create(the_repository, "bulk-fsync");
 	if (bulk_fsync_objdir)
 		tmp_objdir_replace_primary_odb(bulk_fsync_objdir, 0);
 }
@@ -352,12 +359,12 @@ void fsync_loose_object_bulk_checkin(int fd, const char *filename)
 	}
 }
 
-int index_bulk_checkin(struct object_id *oid,
-		       int fd, size_t size, enum object_type type,
-		       const char *path, unsigned flags)
+int index_blob_bulk_checkin(struct object_id *oid,
+			    int fd, size_t size,
+			    const char *path, unsigned flags)
 {
-	int status = deflate_to_pack(&bulk_checkin_packfile, oid, fd, size, type,
-				     path, flags);
+	int status = deflate_blob_to_pack(&bulk_checkin_packfile, oid, fd, size,
+					  path, flags);
 	if (!odb_transaction_nesting)
 		flush_bulk_checkin_packfile(&bulk_checkin_packfile);
 	return status;

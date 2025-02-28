@@ -1,13 +1,20 @@
-#include "cache.h"
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
 #include "refs.h"
-#include "object-store.h"
+#include "object-store-ll.h"
 #include "cache-tree.h"
 #include "mergesort.h"
+#include "commit.h"
 #include "convert.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "gettext.h"
 #include "hex.h"
+#include "path.h"
+#include "read-cache.h"
+#include "revision.h"
 #include "setup.h"
 #include "tag.h"
 #include "trace2.h"
@@ -208,8 +215,12 @@ static struct commit *fake_working_tree_commit(struct repository *r,
 
 	origin = make_origin(commit, path);
 
-	ident = fmt_ident("Not Committed Yet", "not.committed.yet",
-			WANT_BLANK_IDENT, NULL, 0);
+	if (contents_from)
+		ident = fmt_ident("External file (--contents)", "external.file",
+				  WANT_BLANK_IDENT, NULL, 0);
+	else
+		ident = fmt_ident("Not Committed Yet", "not.committed.yet",
+				  WANT_BLANK_IDENT, NULL, 0);
 	strbuf_addstr(&msg, "tree 0000000000000000000000000000000000000000\n");
 	for (parent = commit->parents; parent; parent = parent->next)
 		strbuf_addf(&msg, "parent %s\n",
@@ -1238,7 +1249,7 @@ static int fill_blob_sha1_and_mode(struct repository *r,
 		goto error_out;
 	return 0;
  error_out:
-	oidclr(&origin->blob_oid);
+	oidclr(&origin->blob_oid, the_repository->hash_algo);
 	origin->mode = S_IFINVALID;
 	return -1;
 }
@@ -2692,7 +2703,7 @@ static struct commit *dwim_reverse_initial(struct rev_info *revs,
 		return NULL;
 
 	/* Do we have HEAD? */
-	if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING, &head_oid, NULL))
+	if (!refs_resolve_ref_unsafe(get_main_ref_store(the_repository), "HEAD", RESOLVE_REF_READING, &head_oid, NULL))
 		return NULL;
 	head_commit = lookup_commit_reference_gently(revs->repo,
 						     &head_oid, 1);
@@ -2795,12 +2806,14 @@ void setup_scoreboard(struct blame_scoreboard *sb,
 		if (sb->final) {
 			parent_oid = &sb->final->object.oid;
 		} else {
-			if (!resolve_ref_unsafe("HEAD", RESOLVE_REF_READING, &head_oid, NULL))
+			if (!refs_resolve_ref_unsafe(get_main_ref_store(the_repository), "HEAD", RESOLVE_REF_READING, &head_oid, NULL))
 				die("no such ref: HEAD");
 			parent_oid = &head_oid;
 		}
 
-		setup_work_tree();
+		if (!sb->contents_from)
+			setup_work_tree();
+
 		sb->final = fake_working_tree_commit(sb->repo,
 						     &sb->revs->diffopt,
 						     sb->path, sb->contents_from,
@@ -2918,6 +2931,11 @@ void setup_blame_bloom_data(struct blame_scoreboard *sb)
 
 void cleanup_scoreboard(struct blame_scoreboard *sb)
 {
+	free(sb->lineno);
+	free(sb->final_buf);
+	clear_prio_queue(&sb->commits);
+	oidset_clear(&sb->ignore_list);
+
 	if (sb->bloom_data) {
 		int i;
 		for (i = 0; i < sb->bloom_data->nr; i++) {
